@@ -4,39 +4,40 @@ import xarray as xr
 import pandas as pd
 
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
+from matplotlib.colors import LogNorm
 import geopandas as gpd
 
 import cartopy.crs as ccrs  # Projections list
-import cartopy.feature as cfe # for coastlines
 import cmocean # for ocean colour maps
 import matplotlib
 import matplotlib as mpl
 
 ### Define directories and files
 dir_path = 'XXX'
-dir_model_outputs = os.path.join(dir_path,'Model_Output/')
+dir_model_outputs = os.path.join(dir_path,'ISM_Output_Rae_All/')
+dir_plot = os.path.join(dir_path,'ISM_Output_Rae_All/')
+dir_metric_output = dir_plot
+
+### Define directories for external datasets
+# Highland A shapefiles from Jamieson et al. 2023 published data
+# BedMachineAntarctica v4.0 from personal communication with H. Ockenden
+# MEaSUREs Antarctic Boundaries shapefiles from https://nsidc.org/data/nsidc-0709/versions/2
 dir_data_jha = os.path.join(dir_path,'Datasets/Jamieson_HighlandA')
-dir_plot = os.path.join(dir_path,'Plots/Metrics/')
-#dir_plot = os.path.join(dir_path,'Plots/Metrics_Testing/')
-dir_metric_output = os.path.join(dir_path,'Analysis_Output/')
+dir_data_measures = os.path.join(dir_path,'Datasets/Measures_Boundaries')
 dir_data_bm = os.path.join(dir_path,'Datasets/BedMachine')
 filename_bedmachine4 = 'BedMachineAntarctica-v4.0.nc'
 filepath_bedmachine4 = os.path.join(dir_data_bm,filename_bedmachine4)
-dir_data_measures = os.path.join(dir_path,'Datasets/Measures_Boundaries')
 
 #####################################################################################
 ### PROCESSING FUNCTIONS ###
 #####################################################################################
 
 def import_file(experiment):
-      filename_fort92 = 'fort.92_'+ experiment +'.nc'
+      filename_fort92 = experiment +'.nc'
       file = os.path.join(dir_model_outputs,filename_fort92)
       dsetin = xr.open_dataset(file)
       nt = np.arange(len(dsetin.time))
-      dsetlat = dsetin.isel(time=0).alatd
-      dsetlon = dsetin.isel(time=0).alond
-      return dsetin, nt, dsetlat, dsetlon
+      return dsetin, nt
 
 def process_file_maskvars(dsetin):
       dsetin['fract_masked'] = xr.where(dsetin['maskwater'] == 0, dsetin['fract'], np.nan)
@@ -46,11 +47,20 @@ def process_file_maskvars(dsetin):
       dsetin['heatb_masked'] = xr.where(dsetin['maskwater'] == 0, dsetin['heatb'], np.nan)
       dsetin['heatb_masked'] = xr.where(dsetin['h'] != 0, dsetin['heatb_masked'], np.nan)
       dsetin['heatb_masked'] = dsetin['heatb_masked'].assign_attrs(long_name = 'basal non-frozen fraction (water/land = n/a)',
-                                                                   units = '0-1')
+                                                                   units = 'J/m2/y')
       dsetin['h_masked'] = xr.where(dsetin['maskwater'] == 0, dsetin['h'], np.nan)
       dsetin['h_masked'] = xr.where(dsetin['h'] != 0, dsetin['h_masked'], np.nan)
       dsetin['h_masked'] = dsetin['h_masked'].assign_attrs(long_name = 'ice thickness (grounded)',
                                                                    units = 'm')
+      dsetin['tbhomol_masked'] = xr.where(dsetin['maskwater'] == 0, dsetin['tbhomol'], np.nan)
+      dsetin['tbhomol_masked'] = xr.where(dsetin['h'] != 0, dsetin['tbhomol_masked'], np.nan)
+      dsetin['tbhomol_masked'] = dsetin['tbhomol_masked'].assign_attrs(long_name = 'basal homologous temperature (grounded)',
+                                                                   units = 'C')
+      speed = np.sqrt(dsetin['ua'].data**2 + dsetin['va'].data**2)
+      dsetin['speed'] = xr.DataArray(data=speed,
+                                     dims=["time","y1","x1"],
+                                     coords={"time":dsetin["time"],"y1":dsetin["y1"],"x1":dsetin["x1"]})
+      dsetin['speed'] = dsetin['speed'].assign_attrs(long_name = 'average ice speed', units = 'm/y')
       return dsetin
 
 def create_ASB_shapes(filepath_bedmachine4, domain, highlandA_blocks_3031, low_cutoff=0):
@@ -62,7 +72,6 @@ def create_ASB_shapes(filepath_bedmachine4, domain, highlandA_blocks_3031, low_c
 
       # Filter bedmachine to only records below cutoff
       xr_bed = xr_bedmachine4_shp['bed']
-      #plot_single_map_topo("Test_0", "Calculation Domains", xr_bed)
       print(xr_bed.count())
       df_bed = xr_bed.to_dataframe().reset_index()
 
@@ -100,23 +109,16 @@ def regrid_shape_masks(dsetin, xr_bed_HA):
       Y_coord_new = dsetin.y1.values
       xr_bed_regrid = xr_bed_HA.reindex(x=X_coord_new, method='nearest')
       xr_bed_regrid = xr_bed_regrid.reindex(y=Y_coord_new, method='nearest')
-      #plot_single_map_topo("Test_3_Regrid", "Calculation Domains on Model Grid", xr_bed_regrid.bed_lowoutHA)
-      #plot_single_map_topo("Test_4_Regrid", "Calculation Domains on Model Grid", xr_bed_regrid.bed_inHA)
       df_bed_regrid = xr_bed_regrid.to_dataframe().reset_index()
       return df_bed_regrid, xr_bed_regrid
 
 def preprocess_model_output(dsetin, var):
       # Setup data structures for model output variables
       xr_var = dsetin[var]
-      #dsetin_t0 = dsetin.isel(time=0)
-      #plot_single_map_model(opt_dict,"Test_5_Maskwater", "Maskwater (0=ground/ice, 1=ocean)", dsetin_t0.maskwater, 'maskwater')
-
       df_var = xr_var.to_dataframe().reset_index()
 
       # Join dataframes so have one with fract along with variable to show if in area
       df_all = pd.merge(df_var,df_bed_regrid,left_on=['x1','y1'],right_on=['x','y'])
-      #plot_dist(df_low['fract'],"Test_6_Fract_Dist","Fract whole domain")
-
       return df_all
 
 def calculate_summary_per_timestep(df_var, var, isfract):
@@ -144,7 +146,7 @@ def calculate_summary_per_timestep(df_var, var, isfract):
       for i in range(nt):
             df_t = df_var[df_var['time'] == timesteps[i]]
             ncells_warm_HA = len(df_t.loc[(~np.isnan(df_t['bed_inHA'])) &
-                                          (df_t[var]>boundary)])
+                                          (df_t[var]>=boundary)])
             ncells_cold_HA = len(df_t.loc[(~np.isnan(df_t['bed_inHA'])) &
                                           (df_t[var]<boundary)])
             ncells_retreat_HA = len(df_t.loc[(~np.isnan(df_t['bed_inHA'])) &
@@ -173,25 +175,21 @@ def calculate_summary_per_timestep(df_var, var, isfract):
       df_summary = df_summary.astype(float)
       return df_summary
 
-def calcuate_mean_fract_over_time(dsetin,xr_bed_regrid,domain):
-      xr_fract = dsetin['fract']
+def calcuate_mean_var_over_time(dsetin,var,xr_bed_regrid,domain):
+      xr_var = dsetin[var]
+      varname2 = var + '_inHA'
+      varname3 = varname2 + '_mean'
+      varname4 = varname2 + '_min'
+      varname5 = varname2 + '_max'
       xr_inHA = xr_bed_regrid['bed_inHA'].rename({'y':'y1','x':'x1'})
-      xr_fractinHA = xr.combine_by_coords([xr_fract,xr_inHA])
-      xr_fractinHA['fract_inHA'] = xr.where(~np.isnan(xr_fractinHA['bed_inHA']), xr_fractinHA['fract'], np.nan)
-      xr_fractinHA['fract_inHA_mean'] = xr_fractinHA['fract_inHA'].mean('time', skipna=True)
-      xr_fractinHA = xr_fractinHA.sel(y1 = slice(domain['scene_y_min'], domain['scene_y_max']),
+      xr_varinHA = xr.combine_by_coords([xr_var,xr_inHA])
+      xr_varinHA[varname2] = xr.where(~np.isnan(xr_varinHA['bed_inHA']), xr_varinHA[var], np.nan)
+      xr_varinHA[varname3] = xr_varinHA[varname2].mean('time', skipna=True)
+      xr_varinHA[varname4] = xr_varinHA[varname2].min('time', skipna=True)
+      xr_varinHA[varname5] = xr_varinHA[varname2].max('time', skipna=True)
+      xr_varinHA = xr_varinHA.sel(y1 = slice(domain['scene_y_min'], domain['scene_y_max']),
                                       x1 = slice(domain['scene_x_min'], domain['scene_x_max']))
-      return xr_fractinHA
-
-def calcuate_mean_heatb_over_time(dsetin,xr_bed_regrid,domain):
-      xr_heatb = dsetin['heatb']
-      xr_inHA = xr_bed_regrid['bed_inHA'].rename({'y':'y1','x':'x1'})
-      xr_heatbinHA = xr.combine_by_coords([xr_heatb,xr_inHA])
-      xr_heatbinHA['heatb_inHA'] = xr.where(~np.isnan(xr_heatbinHA['bed_inHA']), xr_heatbinHA['heatb'], np.nan)
-      xr_heatbinHA['heatb_inHA_mean'] = xr_heatbinHA['heatb_inHA'].mean('time', skipna=True)
-      xr_heatbinHA = xr_heatbinHA.sel(y1 = slice(domain['scene_y_min'], domain['scene_y_max']),
-                                      x1 = slice(domain['scene_x_min'], domain['scene_x_max']))
-      return xr_heatbinHA
+      return xr_varinHA
 
 #####################################################################################
 ### PLOTTING FUNCTIONS ###
@@ -211,25 +209,41 @@ def plot_single_map_topo(savename, title, xr_bedmachine):
     ax.set_aspect('equal')
     #ax.set_title(title)
     plt.axis('off')
-    #ax.set_xlabel("m")
-
     plt.savefig(os.path.join(dir_plot,savename+".png"),transparent=True)
 
 def plot_single_map_model(opt_dict, savename, title, xr_ISMout, var, domain):
 
       vmin = opt_dict[var]['vmin']
       vmax = opt_dict[var]['vmax']
-      norm = opt_dict[var]['norm']
       cmap = opt_dict[var]['cmap']
-      if vmin == 0:
-            cbar_ext = 'max'
-      else:
-            cbar_ext = 'both'
 
       XX, YY = np.meshgrid(xr_ISMout.x1, xr_ISMout.y1)
       im_ratio = xr_ISMout.y1.size / xr_ISMout.x1.size
 
       fig = plt.figure()
+      ax = plt.subplot(projection=ccrs.Stereographic(central_longitude=0., central_latitude=-90.))
+      ax.pcolormesh(XX, YY, xr_ISMout, cmap = cmap, vmin = vmin, vmax = vmax)
+      fig.colorbar(mappable = ax.collections[0], fraction=0.046*im_ratio, pad=0.04)
+      highlandA_boundaries_3031.plot(ax=ax, color = 'k')
+      ant_groundingline_b.plot(ax=ax, color='k')
+      ax.set_extent([domain['scene_x_min'], domain['scene_x_max'],
+                  domain['scene_y_min'], domain['scene_y_max']],
+                  ccrs.Stereographic(central_longitude=0., central_latitude=-90.))    
+      ax.set_aspect('equal')
+      ax.set_title(title)
+      plt.axis('off')
+      plt.savefig(os.path.join(dir_plot,savename+".png"),transparent=False, dpi=1200)
+
+def plot_single_map_model_smlscale(opt_dict, savename, title, xr_ISMout, var, domain):
+
+      vmin = opt_dict[var]['vmin']
+      vmax = opt_dict[var]['vmax']
+      cmap = opt_dict[var]['cmap']
+
+      XX, YY = np.meshgrid(xr_ISMout.x1, xr_ISMout.y1)
+      im_ratio = xr_ISMout.y1.size / xr_ISMout.x1.size
+
+      fig = plt.figure(figsize=(4,4))
       ax = plt.subplot(projection=ccrs.Stereographic(central_longitude=0., central_latitude=-90.))
       ax.pcolormesh(XX, YY, xr_ISMout, cmap = cmap, vmin = vmin, vmax = vmax)
       fig.colorbar(mappable = ax.collections[0], fraction=0.046*im_ratio, pad=0.04)
@@ -248,6 +262,7 @@ def plot_single_map_model(opt_dict, savename, title, xr_ISMout, var, domain):
 def plot_dist(df, savename, title):
       fig, ax = plt.subplots()
       ax = df.plot.hist()
+      ax.set_title(title)
       plt.savefig(os.path.join(dir_plot,savename+".png"))
 
 def plot_timeseries_collection(calc_var,expt_collection,expt_collection_label, test_fract):
@@ -345,6 +360,12 @@ opt_dict = {'heatb':{'cmap':'RdBu_r', 'conversion':0, 'AC':'r',
             'heatb_inHA_mean':{'cmap':'RdBu_r', 'conversion':0, 'AC':'r',
                      'vmin':0, 'vmax':1000000, 'norm':None,
                      'mask_opt':False},
+            'heatb_inHA_min':{'cmap':'RdBu_r', 'conversion':0, 'AC':'r',
+                     'vmin':0, 'vmax':1000000, 'norm':None,
+                     'mask_opt':False},
+            'heatb_inHA_max':{'cmap':'RdBu_r', 'conversion':0, 'AC':'r',
+                     'vmin':0, 'vmax':1000000, 'norm':None,
+                     'mask_opt':False},
             'hb':{'cmap':topo_cmap_abs, 'conversion':0, 'AC':'r',
                   'vmin':-2000, 'vmax':1000, 'norm':None,
                   'mask_opt':False},
@@ -363,9 +384,30 @@ opt_dict = {'heatb':{'cmap':'RdBu_r', 'conversion':0, 'AC':'r',
             'fract_inHA_mean':{'cmap':'coolwarm', 'conversion':0, 'AC':'r',
                      'vmin':0, 'vmax':1, 'norm':None,
                      'mask_opt':False},
+            'fract_inHA_min':{'cmap':'coolwarm', 'conversion':0, 'AC':'r',
+                     'vmin':0, 'vmax':1, 'norm':None,
+                     'mask_opt':False},
+            'fract_inHA_max':{'cmap':'coolwarm', 'conversion':0, 'AC':'r',
+                     'vmin':0, 'vmax':1, 'norm':None,
+                     'mask_opt':False},
+            'tbhomol':{'cmap':'BuPu', 'conversion':0, 'AC':'r',
+                     'vmin':-10, 'vmax':0, 'norm':None,
+                     'mask_opt':False},
+            'tbhomol_masked':{'cmap':'BuPu', 'conversion':0, 'AC':'r',
+                     'vmin':-10, 'vmax':0, 'norm':None,
+                     'mask_opt':False},
+            'tbhomol_inHA_mean':{'cmap':'BuPu', 'conversion':0, 'AC':'r',
+                     'vmin':-10, 'vmax':0, 'norm':LogNorm(0, 15),
+                     'mask_opt':False},
             'maskwater':{'cmap':'coolwarm', 'conversion':0, 'AC':'r',
                      'vmin':0, 'vmax':1, 'norm':None,
-                     'mask_opt':False}}
+                     'mask_opt':False},
+            'speed':{'cmap':'Blues', 'conversion':0, 'AC':'r', 
+                      'mask_opt':False, 'vmin':None,'vmax':None, 
+                      'norm':LogNorm(0.1, 5000)},
+            'speed_inHA_mean':{'cmap':'Blues', 'conversion':0, 'AC':'r', 
+                      'mask_opt':False, 'vmin':None,'vmax':None, 
+                      'norm':LogNorm(0.1, 5000)}}
 
 domain_ASB = {                  # Focussed ASB domain 
     'label': 'ASB',
@@ -379,7 +421,7 @@ domain_HighlandA = {            # Highland A (within ASB)
     'scene_y_min': -700000,    # Lower edge y-coord (m)
     'scene_y_max': -450000,     # Upper edge y-coord (m)
     'scene_x_min': 1900000,     # Left edge x-coord (m)
-    'scene_x_max': 2200000,     # Right edge x-coord (m)
+    'scene_x_max': 2220000,     # Right edge x-coord (m)
     }
 
 #####################################################################################
@@ -391,8 +433,6 @@ highlandA_valleys = gpd.read_file(os.path.join(dir_data_jha,'RADARSATRidges/'))
 highlandA_blocks = gpd.read_file(os.path.join(dir_data_jha,'PlateauBoundaries/'))
 highlandA_blocks_3031 = highlandA_blocks.set_crs("EPSG:3031")
 highlandA_boundaries_3031 = highlandA_blocks_3031.boundary
-#highlandA_blocks_4326 = highlandA_blocks_3031.to_crs("EPSG:4326")
-#highlandA_boundaries_4326 = highlandA_blocks_4326.boundary
 
 ant_boundaries = gpd.read_file(os.path.join(dir_data_measures,'IceBoundaries_Antarctica_v02/'))
 ant_groundingline = gpd.read_file(os.path.join(dir_data_measures,'GroundingLine_Antarctica_v02/'))
@@ -400,113 +440,77 @@ ant_boundaries_b = ant_boundaries.boundary
 ant_groundingline_b = ant_groundingline.boundary
 
 xr_bed_HA = create_ASB_shapes(filepath_bedmachine4, domain_ASB, highlandA_blocks_3031, low_cutoff=0)
-#plot_single_map_topo("Test_1", "Calculation Domains", xr_bed_HA.bed_lowoutHA)
-#plot_single_map_topo("Test_2", "Calculation Domains", xr_bed_HA.bed_inHA)
 
 #####################################################################################
 ### DEFINE COLLECTIONS ###
 #####################################################################################
 
-# single runs
-expt_dict_single = {'OC2MedHi':{'savename':'1-18n_t1test4_3km','label':'OC2 MedHiOff'}}
+expt_dict_Rae_5km_MG1 = {'Off':{'savename':'ISM_Output_Rae_MG1_Off','label':'MG1 Off'},
+                            'Low':{'savename':'ISM_Output_Rae_MG1_Low','label':'MG1 Low'},
+                            'MedLo':{'savename':'ISM_Output_Rae_MG1_MedLo','label':'MG1 Medlo'},
+                            'MedHi':{'savename':'ISM_Output_Rae_MG1_MedHi','label':'MG1 MedHi'},
+                            'Max':{'savename':'ISM_Output_Rae_MG1_Max','label':'MG1 Max'}}
 
-# 5km vs 3km test
-expt_dict_3_5km_t1 = {'3km':{'savename':'1-18n_t1test4_3km','label':'3km MG1 MedHi'},
-                      '5km':{'savename':'1-18n_t1test2_5km','label':'5km MG1 MedHi'}}
+expt_dict_Rae_5km_K1 = {'Off':{'savename':'ISM_Output_Rae_K1_Off','label':'K1 Off'},
+                            'Low':{'savename':'ISM_Output_Rae_K1_Low','label':'K1 Low'},
+                            'MedLo':{'savename':'ISM_Output_Rae_K1_MedLo','label':'K1 Medlo'},
+                            'MedHi':{'savename':'ISM_Output_Rae_K1_MedHi','label':'K1 MedHi'},
+                            'Max':{'savename':'ISM_Output_Rae_K1_Max','label':'K1 Max'}}
 
-# Rae t1 5km runs
-expt_dict_Rae_5km_t1_all = {'Off':{'savename':'1-38n_Off_t1_5km','label':'MG1 Off'},
-                            'Low':{'savename':'1-43n_Low_t1_5km','label':'MG1 Low'},
-                            'MedLo':{'savename':'1-44n_MedLo_t1_5km','label':'MG1 Medlo'},
-                            'MedHi':{'savename':'1-45n_MedHi_t1_5km','label':'MG1 MedHi'},
-                            'Max':{'savename':'1-46n_Max_t1_5km','label':'MG1 Max'}}
+expt_dict_Rae_5km_G17 = {'Off':{'savename':'ISM_Output_Rae_G17_Off','label':'G17 Off'},
+                            'Low':{'savename':'ISM_Output_Rae_G17_Low','label':'G17 Low'},
+                            'MedLo':{'savename':'ISM_Output_Rae_G17_MedLo','label':'G17 Medlo'},
+                            'MedHi':{'savename':'ISM_Output_Rae_G17_MedHi','label':'G17 MedHi'},
+                            'Max':{'savename':'ISM_Output_Rae_G17_Max','label':'G17 Max'}}
 
-# Rae t2 5km runs
-expt_dict_Rae_5km_t2_all = {'Off':{'savename':'1-38n_Off_t2_5km','label':'K1 Off'},
-                            'Low':{'savename':'1-43n_Low_t2_5km','label':'K1 Low'},
-                            'MedLo':{'savename':'1-44n_MedLo_t2_5km','label':'K1 Medlo'},
-                            'MedHi':{'savename':'1-45n_MedHi_t2_5km','label':'K1 MedHi'},
-                            'Max':{'savename':'1-46n_Max_t2_5km','label':'K1 Max'}}
+expt_dict_Rae_5km_KM5 = {'Off':{'savename':'ISM_Output_Rae_KM5_Off','label':'KM5 Off'},
+                            'Low':{'savename':'ISM_Output_Rae_KM5_Low','label':'KM5 Low'},
+                            'MedLo':{'savename':'ISM_Output_Rae_KM5_MedLo','label':'KM5 Medlo'},
+                            'MedHi':{'savename':'ISM_Output_Rae_KM5_MedHi','label':'KM5 MedHi'},
+                            'Max':{'savename':'ISM_Output_Rae_KM5_Max','label':'KM5 Max'}}
 
-# Rae t3 5km runs
-expt_dict_Rae_5km_t3_all = {'Off':{'savename':'1-38n_Off_t3_5km','label':'G17 Off'},
-                            'Low':{'savename':'1-43n_Low_t3_5km','label':'G17 Low'},
-                            'MedLo':{'savename':'1-44n_MedLo_t3_5km','label':'G17 Medlo'},
-                            'MedHi':{'savename':'1-45n_MedHi_t3_5km','label':'G17 MedHi'},
-                            'Max':{'savename':'1-46n_Max_t3_5km','label':'G17 Max'}}
+expt_dict_Rae_5km_Off = {'MG1':{'savename':'ISM_Output_Rae_MG1_Off','label':'MG1 Off'},
+                         'K1':{'savename':'ISM_Output_Rae_K1_Off','label':'K1 Off'},
+                         'G17':{'savename':'ISM_Output_Rae_G17_Off','label':'G17 Off'},
+                         'KM5':{'savename':'ISM_Output_Rae_KM5_Off','label':'KM5 Off'}}
 
-# Rae t4 5km runs
-expt_dict_Rae_5km_t4_all = {'Off':{'savename':'1-38n_Off_t4_5km','label':'KM5 Off'},
-                            'Low':{'savename':'1-43n_Low_t4_5km','label':'KM5 Low'},
-                            'MedLo':{'savename':'1-44n_MedLo_t4_5km','label':'KM5 Medlo'},
-                            'MedHi':{'savename':'1-45n_MedHi_t4_5km','label':'KM5 MedHi'},
-                            'Max':{'savename':'1-46n_Max_t4_5km','label':'KM5 Max'}}
+expt_dict_Rae_5km_Low = {'MG1':{'savename':'ISM_Output_Rae_MG1_Low','label':'MG1 Low'},
+                         'K1':{'savename':'ISM_Output_Rae_K1_Low','label':'K1 Low'},
+                         'G17':{'savename':'ISM_Output_Rae_G17_Low','label':'G17 Low'},
+                         'KM5':{'savename':'ISM_Output_Rae_KM5_Low','label':'KM5 Low'}}
 
-# Rae Off 5km runs
-expt_dict_Rae_5km_Off = {'t1':{'savename':'1-38n_Off_t1_5km','label':'MG1 Off'},
-                         't2':{'savename':'1-38n_Off_t2_5km','label':'K1 Off'},
-                         't3':{'savename':'1-38n_Off_t3_5km','label':'G17 Off'},
-                         't4':{'savename':'1-38n_Off_t4_5km','label':'KM5 Off'}}
+expt_dict_Rae_5km_MedLo = {'MG1':{'savename':'ISM_Output_Rae_MG1_MedLo','label':'MG1 MedLo'},
+                           'K1':{'savename':'ISM_Output_Rae_K1_MedLo','label':'K1 MedLo'},
+                           'G17':{'savename':'ISM_Output_Rae_G17_MedLo','label':'G17 MedLo'},
+                           'KM5':{'savename':'ISM_Output_Rae_KM5_MedLo','label':'KM5 MedLo'}}
 
-# Rae Low 5km runs
-expt_dict_Rae_5km_Low = {'t1':{'savename':'1-43n_Low_t1_5km','label':'MG1 Low'},
-                         't2':{'savename':'1-43n_Low_t2_5km','label':'K1 Low'},
-                         't3':{'savename':'1-43n_Low_t3_5km','label':'G17 Low'},
-                         't4':{'savename':'1-43n_Low_t4_5km','label':'KM5 Low'}}
+expt_dict_Rae_5km_MedHi = {'MG1':{'savename':'ISM_Output_Rae_MG1_MedHi','label':'MG1 MedHi'},
+                           'K1':{'savename':'ISM_Output_Rae_K1_MedHi','label':'K1 MedHi'},
+                           'G17':{'savename':'ISM_Output_Rae_G17_MedHi','label':'G17 MedHi'},
+                           'KM5':{'savename':'ISM_Output_Rae_KM5_MedHi','label':'KM5 MedHi'}}
 
-# Rae MedLo 5km runs
-expt_dict_Rae_5km_MedLo = {'t1':{'savename':'1-44n_MedLo_t1_5km','label':'MG1 MedLo'},
-                           't2':{'savename':'1-44n_MedLo_t2_5km','label':'K1 MedLo'},
-                           't3':{'savename':'1-44n_MedLo_t3_5km','label':'G17 MedLo'},
-                           't4':{'savename':'1-44n_MedLo_t4_5km','label':'KM5 MedLo'}}
-
-# Rae MedHi 5km runs
-expt_dict_Rae_5km_MedHi = {'t1':{'savename':'1-45n_MedHi_t1_5km','label':'MG1 MedHi'},
-                           't2':{'savename':'1-45n_MedHi_t2_5km','label':'K1 MedHi'},
-                           't3':{'savename':'1-45n_MedHi_t3_5km','label':'G17 MedHi'},
-                           't4':{'savename':'1-45n_MedHi_t4_5km','label':'KM5 MedHi'}}
-
-# Rae Max 5km runs
-expt_dict_Rae_5km_Max = {'t1':{'savename':'1-46n_Max_t1_5km','label':'MG1 Max'},
-                         't2':{'savename':'1-46n_Max_t2_5km','label':'K1 Max'},
-                         't3':{'savename':'1-46n_Max_t3_5km','label':'G17 Max'},
-                         't4':{'savename':'1-46n_Max_t4_5km','label':'KM5 Max'}}
-
-# Lisiecki t1 5km runs
-expt_dict_Lis_5km_t1_all = {'Off':{'savename':'1-55n_Off_t1_5km','label':'Lisiecki MG1 Off'},
-                            'Low':{'savename':'1-56n_Low_t1_5km','label':'Lisiecki MG1 Low'},
-                            'MedLo':{'savename':'1-57n_MedLo_t1_5km','label':'Lisiecki MG1 Medlo'},
-                            'MedHi':{'savename':'1-58n_MedHi_t1_5km','label':'Lisiecki MG1 MedHi'},
-                            'Max':{'savename':'1-59n_Max_t1_5km','label':'Lisiecki MG1 Max'}}
-
-# Lisiecki t2 5km runs
-expt_dict_Lis_5km_t2_all = {'Off':{'savename':'1-55n_Off_t2_5km','label':'Lisiecki K1 Off'},
-                            'Low':{'savename':'1-56n_Low_t2_5km','label':'Lisiecki K1 Low'},
-                            'MedLo':{'savename':'1-57n_MedLo_t2_5km','label':'Lisiecki K1 Medlo'},
-                            'MedHi':{'savename':'1-58n_MedHi_t2_5km','label':'Lisiecki K1 MedHi'},
-                            'Max':{'savename':'1-59n_Max_t2_5km','label':'Lisiecki K1 Max'}}
-
-# Lisiecki t4 5km runs
-expt_dict_Lis_5km_t4_all = {'Off':{'savename':'1-55n_Off_t4_5km','label':'Lisiecki KM5 Off'},
-                            'Low':{'savename':'1-56n_Low_t4_5km','label':'Lisiecki KM5 Low'},
-                            'MedLo':{'savename':'1-57n_MedLo_t4_5km','label':'Lisiecki KM5 Medlo'},
-                            'MedHi':{'savename':'1-58n_MedHi_t4_5km','label':'Lisiecki KM5 MedHi'},
-                            'Max':{'savename':'1-59n_Max_t4_5km','label':'Lisiecki KM5 Max'}}
+expt_dict_Rae_5km_Max = {'MG1':{'savename':'ISM_Output_Rae_MG1_Max','label':'MG1 Max'},
+                         'K1':{'savename':'ISM_Output_Rae_K1_Max','label':'K1 Max'},
+                         'G17':{'savename':'ISM_Output_Rae_G17_Max','label':'G17 Max'},
+                         'KM5':{'savename':'ISM_Output_Rae_KM5_Max','label':'KM5 Max'}}
 
 
 #####################################################################################
 ### PRODUCE TIMESERIES PLOTS ###
 #####################################################################################
 
-expt_collection_label = 'MG1'
-expt_collection = expt_dict_3_5km_t1
+# Note: This section is slow to run and must be run before the below sections
+
+# Change these to different collections to produce different figure sets
+expt_collection_label = 'G17'
+expt_collection = expt_dict_Rae_5km_G17
 
 for key in expt_collection:
       # Select the experiment and import file
       experiment = expt_collection[key]['savename']
       experiment_label = expt_collection[key]['label']
       print("Loading ",experiment)
-      dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+      dsetin, nt = import_file(experiment)
       dsetin = process_file_maskvars(dsetin)
       df_bed_regrid, xr_bed_regrid = regrid_shape_masks(dsetin, xr_bed_HA)
       ncells_ASBall = df_bed_regrid.bed.count()
@@ -516,14 +520,20 @@ for key in expt_collection:
       # Use masks to process the model output
       df_fract = preprocess_model_output(dsetin, "fract_masked")
       df_heatb = preprocess_model_output(dsetin, "heatb_masked")
+      df_speed = preprocess_model_output(dsetin, "speed")
 
       # Create a timeseries summary
       df_summary_fract = calculate_summary_per_timestep(df_fract, "fract_masked", True)
       df_summary_heatb = calculate_summary_per_timestep(df_heatb, "heatb_masked", False)
+      df_summary_speed = calculate_summary_per_timestep(df_speed, "speed", True)
+
       savepath_f = dir_metric_output + '/Summary_fract_{}.csv'.format(experiment)
       savepath_h = dir_metric_output + '/Summary_heatb_{}.csv'.format(experiment)
+      savepath_s = dir_metric_output + '/Summary_speed_{}.csv'.format(experiment)
+
       df_summary_fract.to_csv(savepath_f)
       df_summary_heatb.to_csv(savepath_h)
+      df_summary_speed.to_csv(savepath_s)
       plot_experiment_area(df_summary_fract,experiment, experiment_label, True)
       plot_experiment_area(df_summary_heatb,experiment, experiment_label, False)
 
@@ -534,64 +544,97 @@ plot_timeseries_collection('Prop_retreat_ASB',expt_collection,expt_collection_la
 ### PRODUCE TIME AVERAGED HIGHLAND A MAPS ###
 #####################################################################################
 
-expt_collection_label = 'MG1'
-expt_collection = expt_dict_3_5km_t1
+# Change these to different collections to produce different figure sets
+expt_collection_label = 'G17'
+expt_collection = expt_dict_Rae_5km_G17
 
 for key in expt_collection:
       # Select the experiment and import file
       experiment = expt_collection[key]['savename']
       experiment_label = expt_collection[key]['label']
       print("Loading ",experiment)
-      dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+      dsetin, nt = import_file(experiment)
       dsetin = process_file_maskvars(dsetin)
       df_bed_regrid, xr_bed_regrid = regrid_shape_masks(dsetin, xr_bed_HA)
-      xr_fractinHA = calcuate_mean_fract_over_time(dsetin,xr_bed_regrid,domain_HighlandA)
-      xr_heatbinHA = calcuate_mean_heatb_over_time(dsetin,xr_bed_regrid,domain_HighlandA)
+      xr_fractinHA = calcuate_mean_var_over_time(dsetin,'fract',xr_bed_regrid,domain_HighlandA)
+      xr_heatbinHA = calcuate_mean_var_over_time(dsetin,'heatb',xr_bed_regrid,domain_HighlandA)
+      xr_speedinHA = calcuate_mean_var_over_time(dsetin,'speed',xr_bed_regrid,domain_HighlandA)
+      xr_tbhomolinHA = calcuate_mean_var_over_time(dsetin,'tbhomol',xr_bed_regrid,domain_HighlandA)
       savename_f = "MapMeanFract_" + experiment
       savename_h = "MapMeanHeatB_" + experiment
+      savename_s = "MapMeanSpeed_" + experiment
+      savename_tbh = "MapMeanTbhomol_" + experiment
       title_f = experiment_label #+ ": Mean Fract over Highland A"
       title_h = experiment_label #+ ": Mean HeatB over Highland A"
+      title_s = experiment_label #+ ": Mean Speed over Highland A"
+      title_tbh = experiment_label #+ ": Mean Speed over Highland A"
       plot_single_map_model(opt_dict,savename_f, title_f, xr_fractinHA['fract_inHA_mean'], 'fract_inHA_mean', domain_HighlandA)
       plot_single_map_model(opt_dict,savename_h, title_h, xr_heatbinHA['heatb_inHA_mean'], 'heatb_inHA_mean', domain_HighlandA)
+      plot_single_map_model(opt_dict,savename_s, title_s, xr_speedinHA['speed_inHA_mean'], 'speed_inHA_mean', domain_HighlandA)
+      plot_single_map_model(opt_dict,savename_tbh, title_tbh, xr_tbhomolinHA['tbhomol_inHA_mean'], 'tbhomol_inHA_mean', domain_HighlandA)
 
 #####################################################################################
-### PRODUCE TIME AVERAGED HIGHLAND A MAPS ACROSS T1-T4  ###
+### PRODUCE TIME AVERAGED HIGHLAND A MAPS ACROSS 4 TIME PERIODS  ###
 #####################################################################################
 
-expt_collection_savename = 'Off_Rae'
-expt_collection_label = 'Off'
-expt_collection = expt_dict_Rae_5km_t3_all
+# Change these to different collections to produce different figure sets
+expt_collection_savename = 'MedHi_Rae'
+expt_collection_label = 'MedHi'
+expt_collection = expt_dict_Rae_5km_MedHi
 
 for key in expt_collection:
       # Select the experiment and import file
       experiment = expt_collection[key]['savename']
       print("Loading ",experiment)
-      dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+      dsetin, nt = import_file(experiment)
       dsetin = process_file_maskvars(dsetin)
-      dsetin_dropped = dsetin[['fract','heatb']]
+      dsetin_dropped = dsetin[['fract','heatb','speed','tbhomol']]
       dsetin_dropped['fract'].max()
-      if key == 't1':
+      if key == 'MG1':
             dsetin_new = dsetin_dropped
       else:
             dsetin_new = xr.concat([dsetin_new,dsetin_dropped], dim="time")
 
 df_bed_regrid, xr_bed_regrid = regrid_shape_masks(dsetin_new, xr_bed_HA)
-xr_fractinHA = calcuate_mean_fract_over_time(dsetin_new,xr_bed_regrid,domain_HighlandA)
-xr_heatbinHA = calcuate_mean_heatb_over_time(dsetin_new,xr_bed_regrid,domain_HighlandA)
+xr_fractinHA = calcuate_mean_var_over_time(dsetin_new,'fract',xr_bed_regrid,domain_HighlandA)
+xr_heatbinHA = calcuate_mean_var_over_time(dsetin_new,'heatb',xr_bed_regrid,domain_HighlandA)
+xr_speedinHA = calcuate_mean_var_over_time(dsetin_new,'speed',xr_bed_regrid,domain_HighlandA)
+xr_tbhomolinHA = calcuate_mean_var_over_time(dsetin_new,'tbhomol',xr_bed_regrid,domain_HighlandA)
 
-savename_f = "MapMeanFract_acrosst1-4_" + expt_collection_savename
-savename_h = "MapMeanHeatB_acrosst1-4_" + expt_collection_savename
-title_f = expt_collection_label #+ ": Mean Fract over Highland A"
-title_h = expt_collection_label #+ ": Mean HeatB over Highland A"
+savename_f1 = "MapMeanFract_acrosst1-4_" + expt_collection_savename
+savename_f2 = "MapMinFract_acrosst1-4_" + expt_collection_savename
+savename_f3 = "MapMaxFract_acrosst1-4_" + expt_collection_savename
+savename_h1 = "MapMeanHeatB_acrosst1-4_" + expt_collection_savename
+savename_h2 = "MapMinHeatB_acrosst1-4_" + expt_collection_savename
+savename_h3 = "MapMaxHeatB_acrosst1-4_" + expt_collection_savename
+savename_s = "MapMeanSpeed_acrosst1-4_" + expt_collection_savename
+savename_tbh = "MapMeanTbhomol_acrosst1-4_" + expt_collection_savename
+title_f1 = expt_collection_label #+ ": Mean"
+title_f2 = expt_collection_label #+ ": Min"
+title_f3 = expt_collection_label #+ ": Max"
+title_h1 = expt_collection_label #+ ": Mean"
+title_h2 = expt_collection_label #+ ": Min"
+title_h3 = expt_collection_label #+ ": Max"
+title_s = expt_collection_label #+ ": Mean Speed over Highland A"
+title_tbh = expt_collection_label #+ ": Mean TbHomol over Highland A"
 
-plot_single_map_model(opt_dict,savename_f, title_f, xr_fractinHA['fract_inHA_mean'], 'fract_inHA_mean', domain_HighlandA)
-plot_single_map_model(opt_dict,savename_h, title_h, xr_heatbinHA['heatb_inHA_mean'], 'heatb_inHA_mean', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_f1, title_f1, xr_fractinHA['fract_inHA_mean'], 'fract_inHA_mean', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_f2, title_f2, xr_fractinHA['fract_inHA_min'], 'fract_inHA_min', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_f3, title_f3, xr_fractinHA['fract_inHA_max'], 'fract_inHA_max', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_h1, title_h1, xr_heatbinHA['heatb_inHA_mean'], 'heatb_inHA_mean', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_h2, title_h2, xr_heatbinHA['heatb_inHA_min'], 'heatb_inHA_min', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_h3, title_h3, xr_heatbinHA['heatb_inHA_max'], 'heatb_inHA_max', domain_HighlandA)
+
+plot_single_map_model_smlscale(opt_dict,savename_s, title_s, xr_speedinHA['speed_inHA_mean'], 'speed_inHA_mean', domain_HighlandA)
+plot_single_map_model_smlscale(opt_dict,savename_tbh, title_tbh, xr_tbhomolinHA['tbhomol_inHA_mean'], 'tbhomol_inHA_mean', domain_HighlandA)
 
 #####################################################################################
 ### MINIMUM EXTENT CALCULATIONS ###
 #####################################################################################
 
-expt_collection = expt_dict_Rae_5km_Off
+# Change these to different collections to calculate the point of minimum extent for 
+# different experiment sets
+expt_collection = expt_dict_Rae_5km_MedHi
 
 for key in expt_collection:
       # Select the experiment and import file
@@ -602,7 +645,7 @@ for key in expt_collection:
       max_val = df_summary_fract[['Prop_retreat_ASB']].max().values[0]
       max_id = df_summary_fract[['Prop_retreat_ASB']].idxmax()
       max_year = df_summary_fract['Year'].iloc[max_id].values[0]
-      if key == 't1':
+      if key == 'MG1':
             max_val_tot = max_val
             max_id_tot = max_id
             max_year_tot = max_year
@@ -616,9 +659,9 @@ for key in expt_collection:
 print(max_t, max_val_tot, max_id_tot, max_year_tot)
 
 # For 'Max' maximum retreat
-experiment = '1-46n_Max_t1_5km'
+experiment = 'ISM_Output_Rae_MG1_Max'
 max_id_tot = 106
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
@@ -629,9 +672,9 @@ title = "Max" # (Rae CO2): Minimum Ice Extent for ASB domain"
 plot_single_map_model(opt_dict,savename, title, dsetin_hmasked, 'h_masked', domain_ASB)
 
 # For 'MedHi' maximum retreat
-experiment = '1-45n_MedHi_t1_5km'
+experiment = 'ISM_Output_Rae_MG1_MedHi'
 max_id_tot = 123
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
@@ -642,9 +685,9 @@ title = "MedHi" # (Rae CO2): Minimum Ice Extent for ASB domain"
 plot_single_map_model(opt_dict,savename, title, dsetin_hmasked, 'h_masked', domain_ASB)
 
 # For 'MedLo' maximum retreat
-experiment = '1-44n_MedLo_t1_5km'
+experiment = 'ISM_Output_Rae_MG1_MedLo'
 max_id_tot = 151
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
@@ -655,9 +698,9 @@ title = "MedLo" # (Rae CO2): Minimum Ice Extent for ASB domain"
 plot_single_map_model(opt_dict,savename, title, dsetin_hmasked, 'h_masked', domain_ASB)
 
 # For 'Low' maximum retreat
-experiment = '1-43n_Low_t1_5km'
+experiment = 'ISM_Output_Rae_MG1_Low'
 max_id_tot = 234
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
@@ -668,9 +711,9 @@ title = "Low" # (Rae CO2): Minimum Ice Extent for ASB domain"
 plot_single_map_model(opt_dict,savename, title, dsetin_hmasked, 'h_masked', domain_ASB)
 
 # For 'Off' maximum retreat
-experiment = '1-38n_Off_t3_5km'
+experiment = 'ISM_Output_Rae_G17_Off'
 max_id_tot = 151
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
@@ -681,10 +724,10 @@ title = "Off" # (Rae CO2): Minimum Ice Extent for ASB domain"
 plot_single_map_model(opt_dict,savename, title, dsetin_hmasked, 'h_masked', domain_ASB)
 
 #####################################################################################
-### SINGLE ANNOTATED AREA PLOT ###
+### RETREAT STAGES DEFINITION ###
 #####################################################################################
 
-expt_dict_single = {'MedHi':{'savename':'1-45n_MedHi_t1_5km','label':'MG1 MedHi'}}
+expt_dict_single = {'MedHi':{'savename':'ISM_Output_Rae_MG1_MedHi','label':'MG1 MedHi'}}
 experiment = expt_dict_single['MedHi']['savename']
 experiment_label = expt_dict_single['MedHi']['label']
 
@@ -715,7 +758,11 @@ stage3_year = -1*-3314100/1000000
 stage4_year = -1*-3313000/1000000
 stage5_year = -1*-3300000/1000000
 
-fig, ax = plt.subplots()
+#####################################################################################
+### RETREAT STAGES ANNOTATED AREA PLOT (run with above section) ###
+#####################################################################################
+
+fig, ax = plt.subplots(figsize=(10,3.7))
 ax.stackplot(time_f, df_summary_fract['Prop_warm_HA'],df_summary_fract['Prop_cold_HA'],df_summary_fract['Prop_retreat_HA'],
              labels=['Warm-based ice','Cold-based ice','No ice'],
              colors=['crimson','deepskyblue','lightgrey'], alpha = 0.9)
@@ -731,7 +778,7 @@ ax.set_xlabel("Ma")
 ax.set_ylabel("Proportion")
 ax.grid(True, linestyle='--', alpha=1)
 ax.legend()
-savepath = dir_plot + '/TSAreaStages_fract_{}.png'.format(experiment_label)
+savepath = dir_plot + '/TSAreaStages_fract_v3_{}.png'.format(experiment_label)
 plt.savefig(savepath, transparent=False, dpi=1200)
 
 fig, ax = plt.subplots()
@@ -755,64 +802,141 @@ plt.savefig(savepath, transparent=False, dpi=1200)
 
 
 #####################################################################################
-### RETREAT STAGES (run with above section) ###
+### RETREAT STAGES MAPS (run with above section) ###
 #####################################################################################
 
-loadpath_f = dir_metric_output + '/Summary_fract_{}.csv'.format(experiment)
-df_summary_fract = pd.read_csv(loadpath_f)
-
-dsetin, nt, dsetlat, dsetlon = import_file(experiment)
+dsetin, nt = import_file(experiment)
 dsetin = process_file_maskvars(dsetin)
 dsetin['x1'] = dsetin['x1']*1000
 dsetin['y1'] = dsetin['y1']*1000
 
+title = experiment_label + " Stage 1 (3.32 Ma)"
 dsetin_fract_masked = dsetin['fract_masked'].isel(time=stage1_id)
 dsetin_fract_masked = dsetin_fract_masked.drop_vars('time')
+savename_fract = "MapStages_T1MedHi_S1_fract"
+plot_single_map_model(opt_dict,savename_fract, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
 dsetin_heatb_masked = dsetin['heatb_masked'].isel(time=stage1_id)
 dsetin_heatb_masked = dsetin_heatb_masked.drop_vars('time')
-savename_f = "MapStages_T1MedHi_S1_fract"
-savename_h = "MapStages_T1MedHi_S1_heatb"
-title = experiment_label + " Stage 1 (3.32 Ma)"
-plot_single_map_model(opt_dict,savename_f, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
-plot_single_map_model(opt_dict,savename_h, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+savename_heatb = "MapStages_T1MedHi_S1_heatb"
+plot_single_map_model(opt_dict,savename_heatb, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+dsetin_h_masked = dsetin['h_masked'].isel(time=stage1_id)
+dsetin_h_masked = dsetin_h_masked.drop_vars('time')
+savename_h_ASB = "MapStages_T1MedHi_S1_h_ASB"
+savename_h_HA = "MapStages_T1MedHi_S1_h_HA"
+plot_single_map_model(opt_dict,savename_h_ASB, title, dsetin_h_masked, 'h_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_h_HA, title, dsetin_h_masked, 'h_masked', domain_HighlandA)
+dsetin_speed = dsetin['speed'].isel(time=stage1_id)
+dsetin_speed = dsetin_speed.drop_vars('time')
+savename_speed = "MapStages_T1MedHi_S1_speed_HA"
+plot_single_map_model(opt_dict,savename_speed, title, dsetin_speed, 'speed', domain_HighlandA)
+dsetin_tbhomol_masked = dsetin['tbhomol_masked'].isel(time=stage1_id)
+dsetin_tbhomol_masked = dsetin_tbhomol_masked.drop_vars('time')
+savename_tbhomol_HA = "MapStages_T1MedHi_S1_tbhomol_HA"
+savename_tbhomol_ASB = "MapStages_T1MedHi_S1_tbhomol_ASB"
+plot_single_map_model(opt_dict,savename_tbhomol_ASB, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_tbhomol_HA, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_HighlandA)
 
+title = experiment_label + " Stage 2 (3.3145 Ma)"
 dsetin_fract_masked = dsetin['fract_masked'].isel(time=stage2_id)
 dsetin_fract_masked = dsetin_fract_masked.drop_vars('time')
+savename_fract = "MapStages_T1MedHi_S2_fract"
+plot_single_map_model(opt_dict,savename_fract, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
 dsetin_heatb_masked = dsetin['heatb_masked'].isel(time=stage2_id)
 dsetin_heatb_masked = dsetin_heatb_masked.drop_vars('time')
-savename_f = "MapStages_T1MedHi_S2_fract"
-savename_h = "MapStages_T1MedHi_S2_heatb"
-title = experiment_label + " Stage 2 (3.3145 Ma)"
-plot_single_map_model(opt_dict,savename_f, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
-plot_single_map_model(opt_dict,savename_h, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+savename_heatb = "MapStages_T1MedHi_S2_heatb"
+plot_single_map_model(opt_dict,savename_heatb, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+dsetin_h_masked = dsetin['h_masked'].isel(time=stage2_id)
+dsetin_h_masked = dsetin_h_masked.drop_vars('time')
+savename_h_ASB = "MapStages_T1MedHi_S2_h_ASB"
+savename_h_HA = "MapStages_T1MedHi_S2_h_HA"
+plot_single_map_model(opt_dict,savename_h_ASB, title, dsetin_h_masked, 'h_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_h_HA, title, dsetin_h_masked, 'h_masked', domain_HighlandA)
+dsetin_speed = dsetin['speed'].isel(time=stage2_id)
+dsetin_speed = dsetin_speed.drop_vars('time')
+savename_speed = "MapStages_T1MedHi_S2_speed_HA"
+plot_single_map_model(opt_dict,savename_speed, title, dsetin_speed, 'speed', domain_HighlandA)
+dsetin_tbhomol_masked = dsetin['tbhomol_masked'].isel(time=stage2_id)
+dsetin_tbhomol_masked = dsetin_tbhomol_masked.drop_vars('time')
+savename_tbhomol_HA = "MapStages_T1MedHi_S2_tbhomol_HA"
+savename_tbhomol_ASB = "MapStages_T1MedHi_S2_tbhomol_ASB"
+plot_single_map_model(opt_dict,savename_tbhomol_ASB, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_tbhomol_HA, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_HighlandA)
 
+title = experiment_label + " Stage 3 (3.3141 Ma)"
 dsetin_fract_masked = dsetin['fract_masked'].isel(time=stage3_id)
 dsetin_fract_masked = dsetin_fract_masked.drop_vars('time')
+savename_fract = "MapStages_T1MedHi_S3_fract"
+plot_single_map_model(opt_dict,savename_fract, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
 dsetin_heatb_masked = dsetin['heatb_masked'].isel(time=stage3_id)
 dsetin_heatb_masked = dsetin_heatb_masked.drop_vars('time')
-savename_f = "MapStages_T1MedHi_S3_fract"
-savename_h = "MapStages_T1MedHi_S3_heatb"
-title = experiment_label + " Stage 3 (3.3141 Ma)"
-plot_single_map_model(opt_dict,savename_f, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
-plot_single_map_model(opt_dict,savename_h, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+savename_heatb = "MapStages_T1MedHi_S3_heatb"
+plot_single_map_model(opt_dict,savename_heatb, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+dsetin_h_masked = dsetin['h_masked'].isel(time=stage3_id)
+dsetin_h_masked = dsetin_h_masked.drop_vars('time')
+savename_h_ASB = "MapStages_T1MedHi_S3_h_ASB"
+savename_h_HA = "MapStages_T1MedHi_S3_h_HA"
+plot_single_map_model(opt_dict,savename_h_ASB, title, dsetin_h_masked, 'h_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_h_HA, title, dsetin_h_masked, 'h_masked', domain_HighlandA)
+dsetin_speed = dsetin['speed'].isel(time=stage3_id)
+dsetin_speed = dsetin_speed.drop_vars('time')
+savename_speed = "MapStages_T1MedHi_S3_speed_HA"
+plot_single_map_model(opt_dict,savename_speed, title, dsetin_speed, 'speed', domain_HighlandA)
+dsetin_tbhomol_masked = dsetin['tbhomol_masked'].isel(time=stage3_id)
+dsetin_tbhomol_masked = dsetin_tbhomol_masked.drop_vars('time')
+savename_tbhomol_HA = "MapStages_T1MedHi_S3_tbhomol_HA"
+savename_tbhomol_ASB = "MapStages_T1MedHi_S3_tbhomol_ASB"
+plot_single_map_model(opt_dict,savename_tbhomol_ASB, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_tbhomol_HA, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_HighlandA)
 
+title = experiment_label + " Stage 4 (3.313 Ma)"
 dsetin_fract_masked = dsetin['fract_masked'].isel(time=stage4_id)
 dsetin_fract_masked = dsetin_fract_masked.drop_vars('time')
+savename_fract = "MapStages_T1MedHi_S4_fract"
+plot_single_map_model(opt_dict,savename_fract, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
 dsetin_heatb_masked = dsetin['heatb_masked'].isel(time=stage4_id)
 dsetin_heatb_masked = dsetin_heatb_masked.drop_vars('time')
-savename_f = "MapStages_T1MedHi_S4_fract"
-savename_h = "MapStages_T1MedHi_S4_heatb"
-title = experiment_label + " Stage 4 (3.313 Ma)"
-plot_single_map_model(opt_dict,savename_f, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
-plot_single_map_model(opt_dict,savename_h, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+savename_heatb = "MapStages_T1MedHi_S4_heatb"
+plot_single_map_model(opt_dict,savename_heatb, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+dsetin_h_masked = dsetin['h_masked'].isel(time=stage4_id)
+dsetin_h_masked = dsetin_h_masked.drop_vars('time')
+savename_h_ASB = "MapStages_T1MedHi_S4_h_ASB"
+savename_h_HA = "MapStages_T1MedHi_S4_h_HA"
+plot_single_map_model(opt_dict,savename_h_ASB, title, dsetin_h_masked, 'h_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_h_HA, title, dsetin_h_masked, 'h_masked', domain_HighlandA)
+dsetin_speed = dsetin['speed'].isel(time=stage4_id)
+dsetin_speed = dsetin_speed.drop_vars('time')
+savename_speed = "MapStages_T1MedHi_S4_speed_HA"
+plot_single_map_model(opt_dict,savename_speed, title, dsetin_speed, 'speed', domain_HighlandA)
+dsetin_tbhomol_masked = dsetin['tbhomol_masked'].isel(time=stage4_id)
+dsetin_tbhomol_masked = dsetin_tbhomol_masked.drop_vars('time')
+savename_tbhomol_HA = "MapStages_T1MedHi_S4_tbhomol_HA"
+savename_tbhomol_ASB = "MapStages_T1MedHi_S4_tbhomol_ASB"
+plot_single_map_model(opt_dict,savename_tbhomol_ASB, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_tbhomol_HA, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_HighlandA)
 
+title = experiment_label + " Stage 5 (3.3 Ma)"
 dsetin_fract_masked = dsetin['fract_masked'].isel(time=stage5_id)
 dsetin_fract_masked = dsetin_fract_masked.drop_vars('time')
+savename_fract = "MapStages_T1MedHi_S5_fract"
+plot_single_map_model(opt_dict,savename_fract, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
 dsetin_heatb_masked = dsetin['heatb_masked'].isel(time=stage5_id)
 dsetin_heatb_masked = dsetin_heatb_masked.drop_vars('time')
-savename_f = "MapStages_T1MedHi_S5_fract"
-savename_h = "MapStages_T1MedHi_S5_heatb"
-title = experiment_label + " Stage 5 (3.3 Ma)"
-plot_single_map_model(opt_dict,savename_f, title, dsetin_fract_masked, 'fract_masked', domain_ASB)
-plot_single_map_model(opt_dict,savename_h, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+savename_heatb = "MapStages_T1MedHi_S5_heatb"
+plot_single_map_model(opt_dict,savename_heatb, title, dsetin_heatb_masked, 'heatb_masked', domain_ASB)
+dsetin_h_masked = dsetin['h_masked'].isel(time=stage5_id)
+dsetin_h_masked = dsetin_h_masked.drop_vars('time')
+savename_h_ASB = "MapStages_T1MedHi_S5_h_ASB"
+savename_h_HA = "MapStages_T1MedHi_S5_h_HA"
+plot_single_map_model(opt_dict,savename_h_ASB, title, dsetin_h_masked, 'h_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_h_HA, title, dsetin_h_masked, 'h_masked', domain_HighlandA)
+dsetin_speed = dsetin['speed'].isel(time=stage5_id)
+dsetin_speed = dsetin_speed.drop_vars('time')
+savename_speed = "MapStages_T1MedHi_S5_speed_HA"
+plot_single_map_model(opt_dict,savename_speed, title, dsetin_speed, 'speed', domain_HighlandA)
+dsetin_tbhomol_masked = dsetin['tbhomol_masked'].isel(time=stage5_id)
+dsetin_tbhomol_masked = dsetin_tbhomol_masked.drop_vars('time')
+savename_tbhomol_HA = "MapStages_T1MedHi_S5_tbhomol_HA"
+savename_tbhomol_ASB = "MapStages_T1MedHi_S5_tbhomol_ASB"
+plot_single_map_model(opt_dict,savename_tbhomol_ASB, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_ASB)
+plot_single_map_model(opt_dict,savename_tbhomol_HA, title, dsetin_tbhomol_masked, 'tbhomol_masked', domain_HighlandA)
 
